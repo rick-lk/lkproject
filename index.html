@@ -1,0 +1,209 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>AI 消息自动应答 · 可验收演示（离线 / 零 API）</title>
+<style>
+  :root{--bg:#0e1116;--panel:#161b22;--line:#2a323d;--fg:#e6edf3;--dim:#8b949e;--acc:#3fb950;--warn:#d29922}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.6 -apple-system,"Segoe UI",Roboto,"Noto Sans SC",sans-serif}
+  header{padding:18px 22px;border-bottom:1px solid var(--line);display:flex;gap:14px;align-items:baseline;flex-wrap:wrap}
+  h1{font-size:16px;margin:0;font-weight:600}
+  .badge{font-size:12px;color:var(--acc);border:1px solid var(--acc);border-radius:999px;padding:1px 9px}
+  .badge.gray{color:var(--dim);border-color:var(--line)}
+  main{display:grid;grid-template-columns:1fr 1fr;gap:18px;padding:18px 22px 44px;max-width:1180px}
+  @media(max-width:860px){main{grid-template-columns:1fr}}
+  section{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:14px 16px}
+  h2{font-size:13px;margin:0 0 10px;color:var(--dim);font-weight:600;letter-spacing:.04em;text-transform:uppercase}
+  textarea{width:100%;height:170px;background:#0b0f14;color:var(--fg);border:1px solid var(--line);border-radius:8px;padding:10px;font:12px/1.55 ui-monospace,Menlo,Consolas,monospace;resize:vertical}
+  input[type=text]{width:100%;background:#0b0f14;color:var(--fg);border:1px solid var(--line);border-radius:8px;padding:11px 12px;font-size:14px}
+  input[type=text]:focus,textarea:focus{outline:none;border-color:var(--acc)}
+  button{margin-top:9px;background:var(--acc);color:#04150a;border:0;border-radius:8px;padding:9px 16px;font-weight:700;cursor:pointer}
+  button.ghost{background:transparent;color:var(--fg);border:1px solid var(--line);font-weight:500}
+  .answer{min-height:78px;background:#0b0f14;border:1px solid var(--line);border-radius:8px;padding:12px;white-space:pre-wrap}
+  .meta{margin-top:8px;color:var(--dim);font-size:12px}
+  .meta b{color:var(--fg)}
+  table{width:100%;border-collapse:collapse;font-size:12px;margin-top:10px}
+  th,td{text-align:left;padding:6px 8px;border-bottom:1px solid var(--line);vertical-align:top}
+  th{color:var(--dim);font-weight:500}
+  .score{color:var(--acc);font-variant-numeric:tabular-nums}
+  .abstain{color:var(--warn)}
+  .hint{color:var(--dim);font-size:12px;margin-top:8px}
+  code{background:#0b0f14;border:1px solid var(--line);border-radius:4px;padding:1px 5px;font-size:12px}
+</style>
+</head>
+<body>
+<header>
+  <h1>AI 消息自动应答引擎 · 可验收演示</h1>
+  <span class="badge">离线运行 · 零 API Key</span>
+  <span class="badge gray">BM25 + CJK 二元切分 + 三重拒答闸门</span>
+  <span class="badge gray" id="corpusSize"></span>
+</header>
+
+<main>
+  <section>
+    <h2>1 · 知识库（每行一条：问题 | 答案）</h2>
+    <textarea id="corpus">price | Our price list: Standard plan $29/month, Pro $79/month, Enterprise custom pricing.
+stock | Stock levels are updated every 2 hours on the product page; out-of-stock items show "notify me".
+hours | We reply 09:00-21:00 UTC+8, 7 days a week. Outside those hours the bot answers and a human follows up.
+refund | Refund within 14 days of purchase, no questions asked. Enterprise contracts follow the signed SLA.
+shipping | Shipping takes 2-5 business days domestically, 7-14 days internationally. Tracking is emailed automatically.
+价格 | 标准版 $29/月，专业版 $79/月，企业版按需报价。
+库存 | 库存每 2 小时同步一次；缺货时页面显示"到货提醒"。
+退款 | 购买后 14 天内无理由退款；企业合同按合同 SLA 执行。
+whatsapp | Connect via the official WhatsApp Business API (Cloud API). No browser automation, no unofficial hooks.
+wechat | 官方企业微信 / 公众号接口接入；不做外挂式 Hook，避免封号风险。
+install | Setup takes about 1 hour: paste your corpus, set fallback thresholds, point the webhook at us.
+accuracy | Answers are grounded only in your corpus; if confidence is below threshold the bot abstains and hands off to a human.</textarea>
+    <div class="hint">三道闸门：<code>τ_score</code> 绝对相关度 · <code>τ_mass</code> 匹配信息量 · <code>τ_ood</code> 未知词占比。<b>任一越界即拒答转人工</b>——这是防幻觉的验收点。</div>
+  </section>
+
+  <section>
+    <h2>2 · 客户提问</h2>
+    <input id="q" type="text" placeholder="e.g. price? / 库存还有吗 / refund policy" value="price?">
+    <div style="display:flex;gap:8px">
+      <button onclick="run()">回答</button>
+      <button class="ghost" onclick="bench()">跑 11 条基准用例</button>
+    </div>
+    <div style="margin-top:14px" class="answer" id="out">（点「回答」）</div>
+    <div class="meta" id="meta"></div>
+    <div id="evidence"></div>
+  </section>
+</main>
+
+<script>
+//---CORE-START---
+const STOP = new Set("a an the is are was were be to of in on for and or if it this that with your you i we our my me do does how what when where which can could should would please ? ! . , ; : ( ) [ ] { } \" '".split(" "));
+
+// 中文疑问填充词：不携带业务信息，若不剥离会制造大量"伪未知词"，让检索器误判。
+const FILLER_CJK = ["有没有", "多少钱", "怎么样", "怎么办", "请问", "怎么", "什么", "可以", "还有",
+  "是否", "一下", "帮我", "我想", "我要", "吗", "呢", "的", "了", "是", "我", "你", "他", "她", "它",
+  "们", "这", "那", "个", "些", "弄", "办", "啊", "吧", "有"];
+const FILLER_RE = new RegExp(FILLER_CJK.slice().sort((a, b) => b.length - a.length)
+  .map(w => w.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|"), "g");
+
+function tokenize(s){
+  s = String(s || "").toLowerCase().replace(FILLER_RE, " ");
+  const out = [];
+  for (const w of (s.match(/[a-z0-9][a-z0-9$%.\-]*/g) || [])) {
+    if (!STOP.has(w)) out.push(w);
+  }
+  for (const runOf of (s.match(/[\u4e00-\u9fff]+/g) || [])) {
+    if (runOf.length === 1) out.push(runOf);
+    for (let i = 0; i + 1 < runOf.length; i++) out.push(runOf.slice(i, i + 2));
+  }
+  return out;
+}
+
+function buildIndex(lines, k1 = 1.2, b = 0.75){
+  const docs = lines.map((raw, id) => {
+    const [q, a] = raw.split("|").map(x => (x || "").trim());
+    if (!a) return null;
+    return { id, q, a, raw, tf: {}, len: 0 };
+  }).filter(Boolean);
+  for (const d of docs) {
+    const toks = tokenize(d.q + " " + d.a);
+    d.len = toks.length || 1;
+    for (const t of toks) d.tf[t] = (d.tf[t] || 0) + 1;
+  }
+  const N = docs.length;
+  const df = {};
+  for (const d of docs) for (const t of Object.keys(d.tf)) df[t] = (df[t] || 0) + 1;
+  const avgdl = docs.reduce((s, d) => s + d.len, 0) / (N || 1);
+  return { docs, df, N, avgdl, k1, b };
+}
+
+function idfOf(idx, t){
+  return Math.log(1 + (idx.N - (idx.df[t] || 0) + 0.5) / ((idx.df[t] || 0) + 0.5));
+}
+
+function score(idx, query){
+  const uniq = [...new Set(tokenize(query))];
+  const ranked = idx.docs.map(d => {
+    let s = 0, mass = 0; const hit = [];
+    for (const t of uniq) {
+      const f = d.tf[t];
+      if (!f) continue;
+      const idf = idfOf(idx, t);
+      s += idf * (f * (idx.k1 + 1)) / (f + idx.k1 * (1 - idx.b + idx.b * d.len / (idx.avgdl || 1)));
+      mass += idf;
+      hit.push(t);
+    }
+    return { doc: d, score: +s.toFixed(4), mass: +mass.toFixed(3), hit };
+  }).sort((x, y) => y.score - x.score || y.mass - x.mass);
+  const unknown = uniq.filter(t => !idx.df[t]);
+  const ood = uniq.length ? unknown.length / uniq.length : 1;
+  return { ranked, uniq, unknown, ood: +ood.toFixed(3) };
+}
+
+function answer(idx, query, opts){
+  const o = Object.assign({ tauScore: 1.0, tauMass: 1.25, tauOod: 0.55 }, opts || {});
+  const { ranked, unknown, ood } = score(idx, query);
+  const best = ranked[0];
+  const fail =
+    (!best || best.score < o.tauScore) ? "score " + (best ? best.score : 0) + " < τ_score " + o.tauScore :
+    (best.mass < o.tauMass) ? "mass " + best.mass + " < τ_mass " + o.tauMass :
+    (ood > o.tauOod) ? "未知词占比 " + ood + " > τ_ood " + o.tauOod + "（" + unknown.slice(0, 4).join("、") + "）" : null;
+  if (fail) {
+    return { abstain: true, text: "（拒答 → 转人工）闸门触发：" + fail, ranked, params: o, ood, unknown };
+  }
+  return { abstain: false, text: best.doc.a, ranked, params: o, ood, unknown };
+}
+//---CORE-END---
+
+const TAU = { tauScore: 1.0, tauMass: 1.25, tauOod: 0.55 };
+function corpusLines(){ return document.getElementById("corpus").value.split("\n").map(s => s.trim()).filter(Boolean); }
+
+function render(){
+  const idx = buildIndex(corpusLines());
+  document.getElementById("corpusSize").textContent = idx.N + " 条知识 / 平均长度 " + idx.avgdl.toFixed(1) + " 词";
+  return idx;
+}
+
+function run(){
+  const idx = render();
+  const q = document.getElementById("q").value;
+  const t0 = performance.now();
+  const res = answer(idx, q, TAU);
+  const ms = performance.now() - t0;
+  const out = document.getElementById("out");
+  out.className = "answer" + (res.abstain ? " abstain" : "");
+  out.textContent = res.text;
+  const top = res.ranked.slice(0, 3);
+  document.getElementById("meta").innerHTML =
+    "延迟 <b>" + ms.toFixed(2) + " ms</b> · 决策 <b>" + (res.abstain ? "拒答转人工" : "作答") +
+    "</b> · top1 score <b>" + (top[0] ? top[0].score : 0) + "</b> · mass <b>" + (top[0] ? top[0].mass : 0) +
+    "</b> · ood <b>" + res.ood + "</b>";
+  document.getElementById("evidence").innerHTML =
+    "<table><tr><th>#</th><th>知识条目</th><th>score</th><th>mass</th><th>命中词</th></tr>" +
+    top.map((r, i) => "<tr><td>" + (i + 1) + "</td><td>" + esc((r.doc.q || r.doc.a).slice(0, 40)) +
+      "</td><td class='score'>" + r.score.toFixed(3) + "</td><td>" + r.mass.toFixed(3) +
+      "</td><td>" + esc(r.hit.join(", ").slice(0, 46)) + "</td></tr>").join("") +
+    "</table>";
+}
+function esc(s){ return String(s).replace(/[&<>]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c])); }
+
+function bench(){
+  const idx = render();
+  const cases = [
+    ["price?", "作答"], ["how much is pro", "作答"], ["库存还有吗", "作答"],
+    ["标准版多少钱", "作答"], ["refund policy", "作答"], ["whatsapp api", "作答"],
+    ["退款怎么弄", "作答"], ["比特币价格", "拒答"],
+    ["what's the weather today", "拒答"], ["asdfgh", "拒答"], ["怎么写周报", "拒答"]
+  ];
+  let pass = 0; const lines = [];
+  for (const [q, want] of cases) {
+    const r = answer(idx, q, TAU);
+    const got = r.abstain ? "拒答" : "作答";
+    const ok = got === want;
+    if (ok) pass++;
+    lines.push((ok ? "✅" : "❌") + " " + q + " → " + got + "（期望 " + want + "）");
+  }
+  document.getElementById("out").className = "answer";
+  document.getElementById("out").textContent = "基准用例 " + pass + "/" + cases.length + " 通过\n" + lines.join("\n");
+}
+run();
+</script>
+</body>
+</html>
